@@ -8,23 +8,22 @@ import com.github.tomakehurst.wiremock.common.Slf4jNotifier;
 import com.github.tomakehurst.wiremock.junit.WireMockClassRule;
 import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.ClassRule;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.*;
+import org.reactivestreams.Publisher;
+import org.slf4j.Logger;
+import reactor.core.publisher.Flux;
 
 import java.time.Duration;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 import static be.wegenenverkeer.atomium.client.FeedPositionStrategies.from;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.exactly;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
+import static org.slf4j.LoggerFactory.getLogger;
 
 public class BackpressureTest {
     private final static ClasspathFileSource WIREMOCK_MAPPINGS = new ClasspathFileSource("basis-scenario");
+    private static final Logger LOG = getLogger(BackpressureTest.class);
 
     @ClassRule
     public static WireMockClassRule wireMockRule = new WireMockClassRule(
@@ -58,7 +57,7 @@ public class BackpressureTest {
         client.feed(client.getPageFetcherBuilder("/feeds/events", Event.class).setAcceptXml().build())
                 .fetchEntries(from("20/forward/10", "urn:uuid:8641f2fd-e8dc-4756-acf2-3b708080ea3a"))
                 .concatMap(event -> Flowable.just(event)
-                        .doOnNext(myEvent -> Thread.sleep(Duration.ofSeconds(1).toMillis())))
+                        .doOnNext(myEvent -> Thread.sleep(Duration.ofSeconds(10).toMillis())))
                 .test()
                 .awaitCount(3)
                 .assertNoErrors()
@@ -73,15 +72,22 @@ public class BackpressureTest {
 
     @Test
     public void testProcessing_otherThread() {
-        List<FeedEntry<Event>> entries = client.feed(client.getPageFetcherBuilder("/feeds/events", Event.class).setAcceptXml().build())
-                .fetchEntries(from("20/forward/10", "urn:uuid:8641f2fd-e8dc-4756-acf2-3b708080ea3a"))
+        Publisher<FeedEntry<Event>> feedEntryPublisher = client.feed(client.getPageFetcherBuilder("/feeds/events", Event.class).setAcceptXml().build())
+                .fetchEntries2(from("20/forward/10", "urn:uuid:8641f2fd-e8dc-4756-acf2-3b708080ea3a"))
+                .doOnNext(eventFeedEntry -> {
+                    LOG.info("FeedEntry0 : {}", eventFeedEntry);
+                });
+
+        Flux.from(feedEntryPublisher)
+                .log()
+                .doOnNext(eventFeedEntry -> {
+                    LOG.info("FeedEntry1 : {}", eventFeedEntry);
+                })
                 .concatMap(event -> Flowable.just(event)
-                        .doOnNext(myEvent -> Thread.sleep(Duration.ofSeconds(1).toMillis()))
+                        .doOnNext(myEvent -> Thread.sleep(Duration.ofSeconds(10).toMillis()))
                         .subscribeOn(Schedulers.newThread()), 1)
-                .test()
-                .awaitDone(3, TimeUnit.SECONDS)
-                .assertNoErrors()
-                .values();
+                .doOnNext(eventFeedEntry -> LOG.info("FeedEntry2 : {}", eventFeedEntry))
+                .blockLast();
 
         // only 1 page is queried
         WireMock.verify(exactly(1), WireMock.getRequestedFor(WireMock.urlPathEqualTo("/feeds/events/20/forward/10")).withHeader("Accept", equalTo("application/xml")));
